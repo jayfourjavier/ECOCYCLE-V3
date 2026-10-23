@@ -9,6 +9,27 @@
 #include <Adafruit_VL53L0X.h>  // https://github.com/adafruit/Adafruit_VL53L0X
 #include <Adafruit_MAX31865.h> // https://github.com/adafruit/Adafruit_MAX31865
 
+enum MachineState
+{
+  IDLE,
+  GRINDING,
+  GETTING_WEIGHT,
+  ADDING_SOIL,
+  LOWERING_SENSOR_PROBE,
+  RAISING_SENSOR_PROBE,
+  GETTING_TEMPERATURE,
+  GETTING_MOISTURE,
+  OPENING_GATE,
+  CLOSING_GATE,
+  MIXING,
+  DROPPING,
+  DROPPING_DONE,
+  ERROR_STATE
+};
+
+MachineState currentState = IDLE;
+MachineState previousState = IDLE;
+
 #define LCD_I2C_ADDRESS 0x27
 #define LCD_COLUMNS 20
 #define LCD_ROWS 4
@@ -37,14 +58,15 @@
 #define SENSOR_STEPPER_ACCELERATION 100
 #define GATE_STEPPER_MAX_SPEED 1000
 #define GATE_STEPPER_ACCELERATION 500
-#define MIXER_STEPPER_MAX_SPEED 100
+#define MIXER_STEPPER_MAX_SPEED 100 // DITO BABAGUHIN BILIS NG MIXER
 #define MIXER_STEPPER_ACCELERATION 50
 #define MIXER_STEPPER_HOMING_SPEED 50
 #define MIXER_STEPPER_HOMING_ACCELERATION 10
 
 #define SENSOR_STEPPER_MAX_STEPS 25000
 #define GATE_STEPPER_MAX_STEPS 8000
-#define MIXER_STEPPER_MIXING_STEPS 1000
+#define MIXER_STEPPER_MIXING_STEPS 5000    // DITO MABABAGO GAANO KATAGAL MAGMIX YUNG MIXER
+#define MIXER_STEPPER_DROPPING_STEPS 25000 // DITO MABABAGO GAANO KATAGAL IIKOT YUNG MIXER PARA MAG DROP NG LAMAN
 
 #define SOIL_TOF_XSHUT_PIN 15
 #define FOOD_TOF_XSHUT_PIN 2
@@ -77,6 +99,9 @@ float soilRangeMm = 0.0f;
 float foodRangeMm = 0.0f;
 float soilPercentage = 0.0f;
 float foodPercentage = 0.0f;
+float currentNetWeight = 0.0f;
+float targetNetWeight = 0.0f;
+float targetSoilWeight = 0.0f;
 
 Adafruit_MCP23X17 mcpInputs, mcpRelay;                                                              // Create instances of Adafruit_MCP23X17 for inputs and relay
 WiFiManager wifiManager;                                                                            // Create an instance of WiFiManager
@@ -380,6 +405,7 @@ void turnOffMeatGrinder()
 void setupWifi()
 {
   WiFi.mode(WIFI_STA);
+
   // reset settings - wipe credentials for testing
   // wifiManager.resetSettings();
 
@@ -387,7 +413,7 @@ void setupWifi()
   wifiManager.setConfigPortalTimeout(60);
   // automatically connect using saved credentials if they exist
   // If connection fails it starts an access point with the specified name
-  if (wifiManager.autoConnect("ECOCYCLE_AP"))
+  if (wifiManager.autoConnect("ECOCYCLE_AP", "password123"))
   {
     Serial.println("Connected to WiFi network successfully!");
   }
@@ -418,6 +444,63 @@ void lcdPrint(const String &message, int row, bool onCenter = true, bool clearRo
   lcd.print(displayMessage);
 
   Serial.printf("[LCD] Row %d: %s\n", row, displayMessage.c_str());
+}
+
+void lcdController()
+{
+  if (currentState == previousState)
+  {
+    return; // No state change, no need to update the LCD
+  }
+
+  switch (currentState)
+  {
+  case IDLE:
+    lcdPrint("IDLE", 0);
+    break;
+  case GRINDING:
+    lcdPrint("GRINDING", 0);
+    break;
+  case GETTING_WEIGHT:
+    lcdPrint("GETTING WEIGHT", 0);
+    break;
+  case ADDING_SOIL:
+    lcdPrint("ADDING SOIL", 0);
+    break;
+  case LOWERING_SENSOR_PROBE:
+    lcdPrint("LOWERING SENSORS", 0);
+    break;
+  case RAISING_SENSOR_PROBE:
+    lcdPrint("RAISING SENSORS", 0);
+    break;
+  case GETTING_TEMPERATURE:
+    lcdPrint("GETTING TEMPERATURE", 0);
+    break;
+  case GETTING_MOISTURE:
+    lcdPrint("GETTING MOISTURE", 0);
+    break;
+  case OPENING_GATE:
+    lcdPrint("OPENING GATE", 0);
+    break;
+  case CLOSING_GATE:
+    lcdPrint("CLOSING GATE", 0);
+    break;
+  case MIXING:
+    lcdPrint("MIXING", 0);
+    break;
+  case DROPPING:
+    lcdPrint("DROPPING", 0);
+    break;
+  case DROPPING_DONE:
+    lcdPrint("DROPPING DONE", 0);
+    break;
+  case ERROR_STATE:
+    lcdPrint("ERROR STATE", 0);
+    break;
+  default:
+    lcdPrint("UNKNOWN STATE", 0);
+    break;
+  }
 }
 
 bool isFoodHopperCoverClosed()
@@ -469,7 +552,7 @@ void testLimitSwitches()
 
 void testScale()
 {
-  float weight = getWeightGrams(10);
+  float weight = getWeightGrams(20);
   Serial.printf("Weight: %.2f grams\n", weight);
   delay(1000);
 }
@@ -513,6 +596,7 @@ void moveStepperToPosition(AccelStepper &stepper, long targetPosition, const cha
 
 void moveMixerToSafePosition()
 {
+
   homeStepper(mixerStepper, isMixerHome, "Mixer Stepper", MIXER_STEPPER_MIXING_STEPS, MIXER_STEPPER_HOMING_SPEED, MIXER_STEPPER_HOMING_ACCELERATION);
   Serial.println("[MIXER] Mixer moved to safe position.\n");
 }
@@ -542,29 +626,39 @@ void setupSteppers()
 
 void openGate()
 {
+  currentState = OPENING_GATE;
+  lcdController();
   homeStepper(gateStepper, isGateHome, "Gate Stepper", GATE_STEPPER_MAX_STEPS);
   Serial.println("[GATE] Gate opened.\n");
 }
 
 void closeGate()
 {
+  currentState = CLOSING_GATE;
+  lcdController();
   moveStepperToPosition(gateStepper, GATE_STEPPER_MAX_STEPS, "Gate Stepper");
   Serial.println("[GATE] Gate closed.\n");
 }
 
 void lowerSensorProbe()
 {
+  currentState = LOWERING_SENSOR_PROBE;
+  lcdController();
   moveStepperToPosition(sensorStepper, SENSOR_STEPPER_MAX_STEPS, "Sensor Stepper");
   Serial.println("[SENSOR PROBE] Sensor probe lowered.\n");
 }
 
 void raiseSensorProbe()
 {
+  currentState = RAISING_SENSOR_PROBE;
+  lcdController();
   homeStepper(sensorStepper, isSensorProbeHome, "Sensor Stepper", SENSOR_STEPPER_MAX_STEPS);
   Serial.println("[SENSOR PROBE] Sensor probe raised.\n");
 }
 void mix()
 {
+  currentState = MIXING;
+  lcdController();
   initStepper(mixerStepper, MIXER_STEPPER_MAX_SPEED, MIXER_STEPPER_ACCELERATION);
   moveStepperToPosition(mixerStepper, -MIXER_STEPPER_MIXING_STEPS, "Mixer Stepper");
   delay(1000);
@@ -572,8 +666,10 @@ void mix()
 }
 void mixDrop()
 {
+  currentState = DROPPING;
+  lcdController();
   initStepper(mixerStepper, MIXER_STEPPER_MAX_SPEED, MIXER_STEPPER_ACCELERATION);
-  moveStepperToPosition(mixerStepper, MIXER_STEPPER_MIXING_STEPS, "Mixer Stepper");
+  moveStepperToPosition(mixerStepper, MIXER_STEPPER_DROPPING_STEPS, "Mixer Stepper");
   delay(1000);
   moveMixerToSafePosition();
 }
@@ -615,6 +711,76 @@ void getTofRangeData()
   }
 }
 
+void drop()
+{
+  raiseSensorProbe();
+  delay(3000);
+  openGate();
+  delay(3000);
+  mix();
+  closeGate();
+  delay(3000);
+}
+
+void readSensorData()
+{
+  getTofRangeData();
+  float soilMoistureValue = analogRead(SOIL_MOISTURE_SENSOR_ANALOG_PIN);
+  Serial.printf("Soil Moisture Sensor Value: %d\n", static_cast<int>(soilMoistureValue));
+  Serial.printf("Soil Moisture Percentage: %.2f %%\n", map(soilMoistureValue, SOIL_MOISTURE_0_PERCENT, SOIL_MOISTURE_100_PERCENT, 0, 100));
+}
+
+void getDataRoutine()
+{
+  lowerSensorProbe();
+  delay(3000);
+  readSensorData();
+  delay(3000);
+  raiseSensorProbe();
+  delay(3000);
+}
+
+void addSoilRoutine()
+{
+  closeGate();
+  currentState = ADDING_SOIL;
+  while (currentNetWeight < targetSoilWeight)
+  {
+    lcdPrint("ADDING SOIL", 0);
+    lcdPrint("Target: " + String(targetSoilWeight, 2) + " g", 1);
+    lcdPrint("Current: " + String(currentNetWeight, 2) + " g", 2);
+
+    turnOnSoilDispenser();
+    delay(1000); // Dispense soil for 5 seconds
+    turnOffSoilDispenser();
+    delay(1000); // Wait for soil to settle
+
+    currentNetWeight = getWeightGrams(10);
+  }
+  lcdController();
+  turnOnSoilDispenser();
+  delay(1000); // Dispense soil for 5 seconds
+  turnOffSoilDispenser();
+  delay(1000); // Dispense soil for 5 seconds
+
+  // GET WEIGHT
+  float weight = getWeightGrams(10);
+
+  Serial.println("[SOIL DISPENSER] Soil dispensing routine completed.\n");
+}
+
+void serialPrintController()
+{
+  static unsigned long lastSerialPrintTime = 0;
+  unsigned long currentTime = millis();
+
+  if (currentTime - lastSerialPrintTime >= 1000) // Print every second
+  {
+    lastSerialPrintTime = currentTime;
+    Serial.printf("[TOF] SOIL: %.0f mm [%.2f %%], FOOD: %.0f mm [%.2f %%]\n", soilRangeMm, soilPercentage, foodRangeMm, foodPercentage);
+  }
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -633,72 +799,37 @@ void setup()
 
   beep(300);
 
+  // turnOnMeatGrinder();
   // delay(5000);
-  // homeStepper(sensorStepper, isSensorProbeHome, "Sensor Stepper", SENSOR_STEPPER_MAX_STEPS);
-  // delay(5000);
-  // moveStepperToPosition(mixerStepper, MIXER_STEPPER_MAX_STEPS, "Mixer Stepper");
-  // delay(5000);
+  // turnOffMeatGrinder();
 
-  // raiseSensorProbe();
-  // delay(3000);
-  // closeGate();
-  // delay(3000);
-  // mix();
-  // delay(3000);
+  // getDataRoutine();
+  // drop();
 
-  // delay(5000);
-  // mixDrop();
+  // addSoilRoutine();
 
-  // lowerSensorProbe();
-  // delay(3000);
-  // readSensorData();
-  // delay(3000);
-  // raiseSensorProbe();
-  // delay(3000);
-  // openGate();
-  // delay(3000);
-  // mixDrop();
-  // delay(3000);
-  // closeGate();
+  // drop();
 }
 
-void lcdController()
-{
-  static unsigned long lastLcdUpdateTime = 0;
-  unsigned long currentTime = millis();
-  if (currentTime - lastLcdUpdateTime >= 1000) // update every second
-  {
-    lastLcdUpdateTime = currentTime;
-    lcdPrint("Soil: " + String(soilRangeMm, 0) + " mm [" + String(soilPercentage, 0) + " %]", 2, false, false);
-    lcdPrint("Food: " + String(foodRangeMm, 0) + " mm [" + String(foodPercentage, 0) + " %]", 3, false, false);
-  }
-}
-
-void serialPrintController()
-{
-  static unsigned long lastSerialPrintTime = 0;
-  unsigned long currentTime = millis();
-
-  if (currentTime - lastSerialPrintTime >= 1000) // Print every second
-  {
-    lastSerialPrintTime = currentTime;
-    Serial.printf("[TOF] SOIL: %.0f mm [%.2f %%], FOOD: %.0f mm [%.2f %%]\n", soilRangeMm, soilPercentage, foodRangeMm, foodPercentage);
-  }
-}
 void loop()
 {
-
-  Serial.printf("Soil Moisture Sensor Value: %d\n", analogRead(SOIL_MOISTURE_SENSOR_ANALOG_PIN));
-  Serial.printf("Temperature: %.2f °C\n", getTemperature());
-  delay(1000);
-  return;
   wifiManager.process();
-
-  // testLimitSwitches();
+  // calibrateScale();
   // testScale();
 
-  getTofRangeData();
+  // Serial.printf("Soil Moisture Sensor Value: %d\n", analogRead(SOIL_MOISTURE_SENSOR_ANALOG_PIN));
+  // Serial.printf("Temperature: %.2f °C\n", getTemperature());
+  // delay(1000);
+  // return;
 
-  lcdController();
-  serialPrintController();
+  // mix();
+  // testScale();
+
+  // delay(5000);
+  // return;
+
+  // testLimitSwitches();
+  // getTofRangeData();
+  // lcdController();
+  // serialPrintController();
 }
