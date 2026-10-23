@@ -1,9 +1,13 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <Wire.h>
 #include <WiFiManager.h>       // https://github.com/tzapu/WiFiManager
 #include <LiquidCrystal_I2C.h> // https://github.com/johnrickman/LiquidCrystal_I2C
 #include <Adafruit_MCP23X17.h> // https://github.com/adafruit/Adafruit-MCP23017-Arduino-Library
 #include <AccelStepper.h>      // https://github.com/waspinator/AccelStepper
+#include <HX711.h>             // https://github.com/RobTillaart/HX711
+#include <Adafruit_VL53L0X.h>  // https://github.com/adafruit/Adafruit_VL53L0X
+#include <Adafruit_MAX31865.h> // https://github.com/adafruit/Adafruit_MAX31865
 
 #define LCD_I2C_ADDRESS 0x27
 #define LCD_COLUMNS 20
@@ -12,6 +16,9 @@
 #define MCP23017_INPUTS_ADDRESS 0x20
 #define MCP23017_INPUTS_INT_PIN 25
 #define MCP23017_RELAY_ADDRESS 0x21
+
+#define SOIL_MOISTURE_0_PERCENT 4095
+#define SOIL_MOISTURE_100_PERCENT 0
 
 #define MCP23017_SENSOR_PROBE_HOME_PIN 1 // A1
 #define MCP23017_FOOD_HOPPER_COVER_PIN 2 // A2
@@ -24,18 +31,32 @@
 #define RELAY_BUZZER 11                  // GPB3
 #define RELAY_MEAT_GRINDER 12            // GPB4
 
-#define SENSOR_STEPPER_MAX_SPEED 1000
-#define SENSOR_STEPPER_ACCELERATION 500
+#define SOIL_MOISTURE_SENSOR_ANALOG_PIN 35
+
+#define SENSOR_STEPPER_MAX_SPEED 500
+#define SENSOR_STEPPER_ACCELERATION 100
 #define GATE_STEPPER_MAX_SPEED 1000
 #define GATE_STEPPER_ACCELERATION 500
-#define MIXER_STEPPER_MAX_SPEED 1000
-#define MIXER_STEPPER_ACCELERATION 500
+#define MIXER_STEPPER_MAX_SPEED 100
+#define MIXER_STEPPER_ACCELERATION 50
 #define MIXER_STEPPER_HOMING_SPEED 50
 #define MIXER_STEPPER_HOMING_ACCELERATION 10
 
 #define SENSOR_STEPPER_MAX_STEPS 25000
 #define GATE_STEPPER_MAX_STEPS 8000
-#define MIXER_STEPPER_MIXING_STEPS 20000
+#define MIXER_STEPPER_MIXING_STEPS 1000
+
+#define SOIL_TOF_XSHUT_PIN 15
+#define FOOD_TOF_XSHUT_PIN 2
+#define FOOD_TOF_ADDRESS 0x30
+#define SOIL_TOF_ADDRESS 0x31
+
+#define PT100_CS_PIN 5
+#define RREF 430.0     // Reference resistor value in ohms
+#define RNOMINAL 100.0 // Nominal resistance of PT100 at 0°C in ohms
+
+#define SOIL_EMPTY_THRESHOLD_MM 300.0f
+#define FOOD_EMPTY_THRESHOLD_MM 200.0f
 
 #define SENSOR_STEPPER_PULSE_PIN 32
 #define SENSOR_STEPPER_DIR_PIN 33
@@ -46,16 +67,213 @@
 #define GATE_STEPPER_PULSE_PIN 12
 #define GATE_STEPPER_DIR_PIN 14
 
+#define SCALE_DATA_PIN 16
+#define SCALE_CLOCK_PIN 4
+#define TO_CALIBRATE 0
+#define SCALE_CALIBRATION_OFFSET 450966
+#define SCALE_CALIBRATION_FACTOR 42.943184
+
+float soilRangeMm = 0.0f;
+float foodRangeMm = 0.0f;
+float soilPercentage = 0.0f;
+float foodPercentage = 0.0f;
+
 Adafruit_MCP23X17 mcpInputs, mcpRelay;                                                              // Create instances of Adafruit_MCP23X17 for inputs and relay
 WiFiManager wifiManager;                                                                            // Create an instance of WiFiManager
 LiquidCrystal_I2C lcd(LCD_I2C_ADDRESS, LCD_COLUMNS, LCD_ROWS);                                      // Create an instance of LiquidCrystal_I2C
 AccelStepper sensorStepper(AccelStepper::DRIVER, SENSOR_STEPPER_PULSE_PIN, SENSOR_STEPPER_DIR_PIN); // Create an instance of AccelStepper for the sensor
 AccelStepper mixerStepper(AccelStepper::DRIVER, MIXER_STEPPER_PULSE_PIN, MIXER_STEPPER_DIR_PIN);    // Create an instance of AccelStepper for the mixer
 AccelStepper gateStepper(AccelStepper::DRIVER, GATE_STEPPER_PULSE_PIN, GATE_STEPPER_DIR_PIN);       // Create an instance of AccelStepper for the gate
+HX711 scale;                                                                                        // Create an instance of HX711 for the scale
+Adafruit_VL53L0X soilTof = Adafruit_VL53L0X();
+Adafruit_VL53L0X foodTof = Adafruit_VL53L0X();
+Adafruit_MAX31865 pt100 = Adafruit_MAX31865(PT100_CS_PIN);
+
+VL53L0X_RangingMeasurementData_t foodRange;
+VL53L0X_RangingMeasurementData_t soilRange;
 
 bool isBuzzerOn = false;        // Flag to track the buzzer state
 bool isSoilDispenserOn = false; // Flag to track the soil dispenser state
 bool isMeatGrinderOn = false;   // Flag to track the meat grinder state
+
+void setupPt100()
+{
+  pt100.begin(MAX31865_3WIRE); // set to 2WIRE or 4WIRE as necessary
+}
+
+float getTemperature()
+{
+
+  return pt100.temperature(RNOMINAL, RREF);
+}
+
+void pt100Controller()
+{
+
+  // read sensor every second
+  static unsigned long lastReadTime = 0;
+  unsigned long currentTime = millis();
+
+  if (currentTime - lastReadTime >= 1000)
+  {
+    lastReadTime = currentTime;
+
+    float temperature = getTemperature();
+    Serial.printf("Current Temperature: %.2f °C\n", temperature);
+  }
+}
+
+void setupTofSensors()
+{
+  pinMode(SOIL_TOF_XSHUT_PIN, OUTPUT);
+  pinMode(FOOD_TOF_XSHUT_PIN, OUTPUT);
+
+  digitalWrite(SOIL_TOF_XSHUT_PIN, LOW);
+  digitalWrite(FOOD_TOF_XSHUT_PIN, LOW);
+}
+
+void getFoodRange()
+{
+  digitalWrite(FOOD_TOF_XSHUT_PIN, HIGH);
+  digitalWrite(SOIL_TOF_XSHUT_PIN, LOW);
+
+  delay(100);
+
+  if (!foodTof.begin())
+  {
+    Serial.println("Failed to boot food ToF sensor");
+  }
+  else
+  {
+    Serial.println("Food ToF sensor booted successfully");
+    foodTof.rangingTest(&foodRange, false);
+    foodRangeMm = static_cast<float>(foodRange.RangeMilliMeter);
+    Serial.printf("Food ToF Range: %.2f mm\n", foodRangeMm);
+  }
+}
+
+void getSoilRange()
+{
+  digitalWrite(SOIL_TOF_XSHUT_PIN, HIGH);
+  digitalWrite(FOOD_TOF_XSHUT_PIN, LOW);
+  delay(100);
+  if (!soilTof.begin())
+  {
+    Serial.println("Failed to boot soil ToF sensor");
+  }
+  else
+  {
+    Serial.println("Soil ToF sensor booted successfully");
+    soilTof.rangingTest(&soilRange, false);
+    soilRangeMm = static_cast<float>(soilRange.RangeMilliMeter);
+    Serial.printf("Soil ToF Range: %.2f mm\n", soilRangeMm);
+  }
+}
+
+void setupScale()
+{
+  scale.begin(SCALE_DATA_PIN, SCALE_CLOCK_PIN);
+  scale.set_offset(SCALE_CALIBRATION_OFFSET);
+  scale.set_scale(SCALE_CALIBRATION_FACTOR);
+}
+
+void calibrateScale()
+{
+  if (!TO_CALIBRATE)
+  {
+    return;
+  }
+
+  Serial.println("\n\nCALIBRATION");
+  Serial.println("===========");
+  Serial.println("remove all weight from the loadcell");
+  while (Serial.available())
+  {
+    Serial.read();
+  }
+  Serial.println("and press enter\n");
+
+  while (Serial.available() == 0)
+  {
+  }
+
+  Serial.println("Determine zero weight offset");
+  scale.tare(20);
+  int32_t offset = scale.get_offset();
+
+  Serial.print("OFFSET: ");
+  Serial.println(offset);
+  Serial.println();
+
+  Serial.println("place a weight on the loadcell");
+  while (Serial.available())
+  {
+    Serial.read();
+  }
+  Serial.println("enter the weight in (whole) grams and press enter");
+
+  uint32_t weight = 0;
+  while (Serial.peek() != '\n')
+  {
+    if (Serial.available())
+    {
+      char ch = Serial.read();
+      if (isdigit(ch))
+      {
+        weight *= 10;
+        weight += static_cast<uint32_t>(ch - '0');
+      }
+    }
+  }
+
+  Serial.print("WEIGHT: ");
+  Serial.println(weight);
+  scale.calibrate_scale(weight, 20);
+  float scaleFactor = scale.get_scale();
+
+  Serial.print("SCALE:  ");
+  Serial.println(scaleFactor, 6);
+  Serial.print("\nuse scale.set_offset(");
+  Serial.print(offset);
+  Serial.print("); and scale.set_scale(");
+  Serial.print(scaleFactor, 6);
+  Serial.print(");\n");
+  Serial.println("in the setup of your project");
+  Serial.println("\n\n");
+
+  Serial.printf("#define SCALE_CALIBRATION_OFFSET %ld\n", static_cast<long>(offset));
+  Serial.printf("#define SCALE_CALIBRATION_FACTOR %.6f\n", scaleFactor);
+  Serial.println();
+}
+
+float getWeightGrams(uint8_t sampleSize = 10)
+{
+  if (sampleSize == 0)
+  {
+    return 0.0f;
+  }
+
+  float total = 0.0f;
+  uint8_t validReadings = 0;
+
+  for (uint8_t i = 0; i < sampleSize; ++i)
+  {
+    if (!scale.is_ready())
+    {
+      delay(1);
+      continue;
+    }
+
+    float reading = scale.get_units(1);
+    if (!isnan(reading) && !isinf(reading))
+    {
+      total += reading;
+      ++validReadings;
+    }
+  }
+
+  return validReadings > 0 ? (total / static_cast<float>(validReadings)) : 0.0f;
+}
 
 void initMcp(Adafruit_MCP23X17 &mcp, uint8_t address, const char *name)
 {
@@ -249,6 +467,13 @@ void testLimitSwitches()
   delay(1000);
 }
 
+void testScale()
+{
+  float weight = getWeightGrams(10);
+  Serial.printf("Weight: %.2f grams\n", weight);
+  delay(1000);
+}
+
 void initStepper(AccelStepper &stepper, int maxSpeed, int acceleration)
 {
   stepper.setMaxSpeed(maxSpeed);
@@ -301,7 +526,15 @@ void setupSteppers()
 
   // Home the steppers
   homeStepper(sensorStepper, isSensorProbeHome, "Sensor Stepper", SENSOR_STEPPER_MAX_STEPS);
-  homeStepper(gateStepper, isGateHome, "Gate Stepper", GATE_STEPPER_MAX_STEPS);
+  if (getWeightGrams(10) < 200) // Check if the scale is empty (less than 200 grams)
+  {
+    Serial.println("[SCALE] Scale is empty during setup. Proceeding with homing.");
+    homeStepper(gateStepper, isGateHome, "Gate Stepper", GATE_STEPPER_MAX_STEPS);
+  }
+  else
+  {
+    Serial.println("[SCALE] Warning: Scale is not empty during setup. Please ensure the scale is clear before proceeding.");
+  }
   // homeStepper(mixerStepper, isMixerHome, "Mixer Stepper", MIXER_STEPPER_MIXING_STEPS);
 
   moveMixerToSafePosition();
@@ -332,26 +565,69 @@ void raiseSensorProbe()
 }
 void mix()
 {
+  initStepper(mixerStepper, MIXER_STEPPER_MAX_SPEED, MIXER_STEPPER_ACCELERATION);
   moveStepperToPosition(mixerStepper, -MIXER_STEPPER_MIXING_STEPS, "Mixer Stepper");
   delay(1000);
   moveMixerToSafePosition();
 }
 void mixDrop()
 {
+  initStepper(mixerStepper, MIXER_STEPPER_MAX_SPEED, MIXER_STEPPER_ACCELERATION);
   moveStepperToPosition(mixerStepper, MIXER_STEPPER_MIXING_STEPS, "Mixer Stepper");
   delay(1000);
   moveMixerToSafePosition();
 }
 
+float getSoilLevelPercent()
+{
+  return constrain(
+      (SOIL_EMPTY_THRESHOLD_MM - soilRangeMm) * 100.0f / SOIL_EMPTY_THRESHOLD_MM,
+      0.0f,
+      100.0f);
+}
+
+float getFoodLevelPercent()
+{
+  return constrain(
+      (FOOD_EMPTY_THRESHOLD_MM - foodRangeMm) * 100.0f / FOOD_EMPTY_THRESHOLD_MM,
+      0.0f,
+      100.0f);
+}
+// read every second
+void getTofRangeData()
+{
+
+  static unsigned long lastTofReadTime = 0;
+  unsigned long currentTime = millis();
+  if (currentTime - lastTofReadTime >= 1000) // read every second
+  {
+    lastTofReadTime = currentTime;
+
+    getSoilRange();
+    getFoodRange();
+
+    // PRINT ON ROW 3 & 4
+    lcdPrint("Soil: " + String(soilRangeMm, 2) + " mm", 2, false);
+    lcdPrint("Food: " + String(foodRangeMm, 2) + " mm", 3, false);
+
+    soilPercentage = getSoilLevelPercent();
+    foodPercentage = getFoodLevelPercent();
+  }
+}
+
 void setup()
 {
   Serial.begin(115200);
+  pinMode(SOIL_MOISTURE_SENSOR_ANALOG_PIN, INPUT);
 
   setupWifi();
   setupLcd();
   setupMcp23017();
   delay(3000);
   setupSteppers();
+  setupScale();
+  setupTofSensors();
+  setupPt100();
 
   beep(150, 3, 100);
 
@@ -363,20 +639,66 @@ void setup()
   // moveStepperToPosition(mixerStepper, MIXER_STEPPER_MAX_STEPS, "Mixer Stepper");
   // delay(5000);
 
-  raiseSensorProbe();
-  delay(3000);
-  closeGate();
-  delay(3000);
-  mix();
-  delay(3000);
+  // raiseSensorProbe();
+  // delay(3000);
+  // closeGate();
+  // delay(3000);
+  // mix();
+  // delay(3000);
 
   // delay(5000);
   // mixDrop();
+
+  // lowerSensorProbe();
+  // delay(3000);
+  // readSensorData();
+  // delay(3000);
+  // raiseSensorProbe();
+  // delay(3000);
+  // openGate();
+  // delay(3000);
+  // mixDrop();
+  // delay(3000);
+  // closeGate();
 }
 
+void lcdController()
+{
+  static unsigned long lastLcdUpdateTime = 0;
+  unsigned long currentTime = millis();
+  if (currentTime - lastLcdUpdateTime >= 1000) // update every second
+  {
+    lastLcdUpdateTime = currentTime;
+    lcdPrint("Soil: " + String(soilRangeMm, 0) + " mm [" + String(soilPercentage, 0) + " %]", 2, false, false);
+    lcdPrint("Food: " + String(foodRangeMm, 0) + " mm [" + String(foodPercentage, 0) + " %]", 3, false, false);
+  }
+}
+
+void serialPrintController()
+{
+  static unsigned long lastSerialPrintTime = 0;
+  unsigned long currentTime = millis();
+
+  if (currentTime - lastSerialPrintTime >= 1000) // Print every second
+  {
+    lastSerialPrintTime = currentTime;
+    Serial.printf("[TOF] SOIL: %.0f mm [%.2f %%], FOOD: %.0f mm [%.2f %%]\n", soilRangeMm, soilPercentage, foodRangeMm, foodPercentage);
+  }
+}
 void loop()
 {
+
+  Serial.printf("Soil Moisture Sensor Value: %d\n", analogRead(SOIL_MOISTURE_SENSOR_ANALOG_PIN));
+  Serial.printf("Temperature: %.2f °C\n", getTemperature());
+  delay(1000);
+  return;
   wifiManager.process();
 
-  testLimitSwitches();
+  // testLimitSwitches();
+  // testScale();
+
+  getTofRangeData();
+
+  lcdController();
+  serialPrintController();
 }
