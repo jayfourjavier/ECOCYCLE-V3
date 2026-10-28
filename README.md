@@ -1,5 +1,9 @@
 # ECOCYCLE V3
 
+## 3D Model
+
+![3D Model](assets/3d_model.png)
+
 ## Materials Used
 
 | Material | Image | Description | Usage |
@@ -16,13 +20,13 @@ TB6600 STEPPER MOTOR DRIVER | ![TB6600](assets/tb6600.png) | A stepper motor dri
 XL4015 BUCK CONVERTER MODULE | ![XL4015](assets/xl4015.png) | A DC-DC buck converter that can step down voltage from a higher level to a lower level | Used to step down the 24V supply to 5V for the ESP32 and other components. |
 PC817 | ![PC817](assets/pc817.png) | An optocoupler that provides electrical isolation between input and output | Used to convert the 24V signal from the inductive proximity sensor to 3.3V. |
 PROTOBOARD | ![PROTOBOARD](assets/protoboard.png) | A printed circuit board with through hole connections for prototyping electronic circuits | Together with 2.54mm Male and female pinheaders, used for building the "MOTHERBOARD" of the system with pluggable interfaces to facilitate more convenient assembly, troubleshooting, and parts replacement. |
-MALE AND FEMALE PINHEADERS | ![MALE AND FEMALE PINHEADERS](assets/male_and_female_pinheaders.png) | Connectors used to create pluggable interfaces on the protoboard | Used to create pluggable interfaces on the protoboard for easier assembly and maintenance. |
+MALE AND FEMALE PINHEADERS | ![MALE AND FEMALE PINHEADERS](assets/pinheaders.png) | Connectors used to create pluggable interfaces on the protoboard | Used to create pluggable interfaces on the protoboard for easier assembly and maintenance. |
 ANALOG SOIL MOISTURE SENSOR | ![ANALOG SOIL MOISTURE SENSOR](assets/analog_soil_moisture_sensor.png) | A sensor that measures the volumetric water content in soil | Used to check the moisture level of the food waste and soil mixture in the system. |
-PT100 RTD | ![PT100 RTD](assets/pt100_rtd.png) | A type of resistance temperature detector (RTD) that uses platinum as the sensing element | Used to check the temperature of the food waste and soil mixture in the system. |
+PT100 RTD | ![PT100 RTD](assets/pt100.png) | A type of resistance temperature detector (RTD) that uses platinum as the sensing element | Used to check the temperature of the food waste and soil mixture in the system. |
 CABLE TRAY | ![CABLE TRAY](assets/cable_tray.png) | A tray used to support insulated electrical cables used for power distribution and communication. | Used to organize and protect the wiring of the system. |
 HEAT SHRINK TUBING | ![HEAT SHRINK TUBING](assets/heat_shrink_tubing.png) | A shrinkable plastic tube used to insulate wires and provide strain relief | Used to insulate and protect the wiring connections in the system. |
 GALVANIZED IRON SHEETS | ![GALVANIZED IRON SHEETS](assets/galvanized_iron_sheets.png) | Sheets of steel coated with a layer of zinc to prevent rusting | Used in the assembly of soil hopper, mixer, panel box enclosure, and protective covers of the system |
-GALVANIZED IRON TUBULAR BARS | ![GALVANIZED IRON TUBULAR](assets/galvanized_iron_tubular.png) | Tubular steel bars coated with zinc to prevent rusting | Used to provide structural support for the frame of the system. |
-PILLOW BLOCKS | ![PILLOW BLOCKS](assets/pillow_blocks.png) | A type of bearing housing that provides support for a rotating shaft with the help of compatible bearings and various accessories | Used to support the rotating shafts of the mixer and sensor arm in the system. |
-LEAD SCREW T8 AND NUT | ![LEAD SCREW T8 AND NUT](assets/lead_screw_t8_and_nut.png) | A mechanical linear actuator that translates rotational motion to linear motion | Used to control the vertical movement of the sensor arm, and mixer gate in the system. |
+GALVANIZED IRON TUBULAR BARS | ![GALVANIZED IRON TUBULAR](assets/tubular.png) | Tubular steel bars coated with zinc to prevent rusting | Used to provide structural support for the frame of the system. |
+PILLOW BLOCKS | ![PILLOW BLOCKS](assets/pillow_block.png) | A type of bearing housing that provides support for a rotating shaft with the help of compatible bearings and various accessories | Used to support the rotating shafts of the mixer and sensor arm in the system. |
+LEAD SCREW T8 AND NUT | ![LEAD SCREW T8 AND NUT](assets/lead_screw_with_tnut.png) | A mechanical linear actuator that translates rotational motion to linear motion | Used to control the vertical movement of the sensor arm, and mixer gate in the system. |
 FLANGE COUPLING | ![FLANGE COUPLING](assets/flange_coupling.png) | A type of coupling that connects two shafts together at their ends for the purpose of transmitting power | Used to make a mixer blade removeable wit the mixer shaft for easier maintenance and cleaning. |
