@@ -1,0 +1,87 @@
+{
+    // ==========================================
+    // EDITOR
+    // ==========================================
+    "editor.fontFamily": "Roboto Mono, Consolas, monospace",
+    "editor.minimap.enabled": false,
+    "editor.minimap.renderCharacters": false,
+    "editor.formatOnSave": true,
+    "editor.formatOnPaste": true,
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true,
+    "workbench.editor.enablePreview": false,
+    "explorer.compactFolders": false,
+    // ==========================================
+    // PLATFORMIO TOOLBAR
+    // ==========================================
+    "platformio-ide.toolbar": [
+        {
+            "text": "$(home)",
+            "tooltip": "PlatformIO: Home",
+            "commands": "platformio-ide.showHome"
+        },
+        {
+            "text": "$(check)",
+            "tooltip": "PlatformIO: Build",
+            "commands": "platformio-ide.build"
+        },
+        {
+            "text": "$(arrow-up)",
+            "tooltip": "PlatformIO: Upload and Monitor",
+            "commands": [
+                "multiCommand.closeTerminalAndUpload"
+            ]
+        },
+        {
+            "text": "$(trashcan)",
+            "tooltip": "PlatformIO: Clean",
+            "commands": "platformio-ide.clean"
+        },
+        {
+            "text": "$(beaker)",
+            "tooltip": "PlatformIO: Test",
+            "commands": "platformio-ide.test"
+        },
+        {
+            "text": "$(plug)",
+            "tooltip": "PlatformIO: Serial Monitor",
+            "commands": "platformio-ide.serialMonitor"
+        },
+        {
+            "text": "$(terminal)",
+            "tooltip": "PlatformIO: New Terminal",
+            "commands": "platformio-ide.newTerminal"
+        }
+    ],
+    // ==========================================
+    // MULTI COMMAND
+    // ==========================================
+    "multiCommand.commands": [
+        {
+            "command": "multiCommand.closeTerminalAndUpload",
+            "interval": 0,
+            "sequence": [
+                "workbench.action.files.saveAll",
+                "workbench.action.terminal.kill",
+                "platformio-ide.uploadAndMonitor"
+            ]
+        }
+    ],
+    // ==========================================
+    // TERMINAL
+    // ==========================================
+    "terminal.integrated.defaultProfile.windows": "Command Prompt",
+    "terminal.integrated.fontFamily": "monospace",
+    // ==========================================
+    // FILE AND SEARCH EXCLUSIONS
+    // ==========================================
+    // ==========================================
+    // GIT
+    // ==========================================
+    "git.enableSmartCommit": true,
+    "git.autofetch": true,
+    "git.confirmSync": false,
+    // ==========================================
+    // WORKSPACE
+    // ==========================================
+}
