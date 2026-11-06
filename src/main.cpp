@@ -8,6 +8,13 @@
 #include <HX711.h>             // https://github.com/RobTillaart/HX711
 #include <Adafruit_VL53L0X.h>  // https://github.com/adafruit/Adafruit_VL53L0X
 #include <Adafruit_MAX31865.h> // https://github.com/adafruit/Adafruit_MAX31865
+#include <time.h>
+
+#define ENABLE_USER_AUTH
+#define ENABLE_DATABASE
+#include <FirebaseClient.h>
+#include "ExampleFunctions.h" // Provides SSL_CLIENT and set_ssl_client_insecure_and_buffer()
+#include "FirebaseConfig.h"
 
 /**
  * @brief Enum representing the different states of the machine.
@@ -25,7 +32,8 @@
  * 10 - MIXING: The machine is mixing the material.<br>
  * 11 - DROPPING: The machine is dropping the material.<br>
  * 12 - DROPPING_DONE: The dropping operation is complete.<br>
- * 13 - ERROR_STATE: The machine has encountered an error.
+ * 13 - ERROR_STATE: The machine has encountered an error.<br>
+ * 14 - GETTING_DATA: The machine is collecting sensor data.
  */
 enum MachineState
 {
@@ -42,7 +50,8 @@ enum MachineState
   MIXING,
   DROPPING,
   DROPPING_DONE,
-  ERROR_STATE
+  ERROR_STATE,
+  GETTING_DATA
 };
 
 MachineState currentState = IDLE;
@@ -450,6 +459,75 @@ void setupWifi()
   {
     Serial.println("Configportal running");
   }
+}
+
+SSL_CLIENT sslClient;
+using AsyncClient = AsyncClientClass;
+AsyncClient firebaseAsyncClient(sslClient);
+UserAuth firebaseUserAuth(FIREBASE_WEB_API_KEY, FIREBASE_USER_EMAIL, FIREBASE_USER_PASSWORD, 3000);
+FirebaseApp firebaseApp;
+RealtimeDatabase firebaseDatabase;
+
+// Initializes Firebase auth and blocks (up to timeoutMs) until the app is ready.
+bool setupFirebase(unsigned long timeoutMs = 15000)
+{
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println("[FIREBASE] WiFi not connected. Skipping Firebase setup.");
+    return false;
+  }
+
+  set_ssl_client_insecure_and_buffer(sslClient);
+  initializeApp(firebaseAsyncClient, firebaseApp, getAuth(firebaseUserAuth), nullptr, "authTask");
+  firebaseApp.getApp<RealtimeDatabase>(firebaseDatabase);
+  firebaseDatabase.url(FIREBASE_DATABASE_URL);
+
+  unsigned long start = millis();
+  while (!firebaseApp.ready() && millis() - start < timeoutMs)
+  {
+    firebaseApp.loop();
+    delay(10);
+  }
+
+  if (!firebaseApp.ready())
+  {
+    Serial.println("[FIREBASE] Authentication timed out.");
+    return false;
+  }
+
+  Serial.println("[FIREBASE] Ready.");
+  return true;
+}
+
+unsigned long getEpochSeconds(unsigned long timeoutMs = 10000)
+{
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+
+  unsigned long start = millis();
+  time_t now = time(nullptr);
+  while (now < 1700000000L && millis() - start < timeoutMs)
+  {
+    delay(200);
+    now = time(nullptr);
+  }
+
+  return now < 1700000000L ? 0 : static_cast<unsigned long>(now);
+}
+
+bool writeDummyDataToFirebase()
+{
+  if (!firebaseApp.ready())
+  {
+    Serial.println("[FIREBASE] Not ready. Dummy write skipped.");
+    return false;
+  }
+
+  unsigned long epoch = getEpochSeconds();
+  String csv = "EC-TEST," + String(epoch) + ",29.4,58.0";
+
+  bool ok = firebaseDatabase.set<String>(firebaseAsyncClient, "/test/dummy", csv);
+  Serial.printf("[FIREBASE] Dummy write %s: %s\n", ok ? "OK" : "FAILED", csv.c_str());
+  return ok;
 }
 
 void lcdPrint(const String &message, int row, bool onCenter = true, bool clearRow = true, bool allCaps = true)
@@ -916,8 +994,6 @@ void mainController(){
       }
 
       previousState = IDLE;
-      if 
-
       break;
     case ADDING_SOIL:
       // addSoilRoutine();
@@ -947,6 +1023,11 @@ void setup()
   setupTofSensors();
   setupPt100();
 
+  if (setupFirebase())
+  {
+    writeDummyDataToFirebase();
+  }
+
   beep(150, 3, 100);
   beep(300);
 
@@ -967,8 +1048,9 @@ void setup()
 
 void loop()
 {
+  firebaseApp.loop();
   wifiManager.process();
-  coverController();
+  // coverController();
   // calibrateScale();
   // testScale();
 
