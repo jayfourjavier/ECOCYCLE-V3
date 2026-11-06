@@ -9,6 +9,24 @@
 #include <Adafruit_VL53L0X.h>  // https://github.com/adafruit/Adafruit_VL53L0X
 #include <Adafruit_MAX31865.h> // https://github.com/adafruit/Adafruit_MAX31865
 
+/**
+ * @brief Enum representing the different states of the machine.
+ *
+ * 0 - IDLE: The machine is idle and not performing any operations.<br>
+ * 1 - GRINDING: The machine is currently grinding the material.<br>
+ * 2 - GETTING_WEIGHT: The machine is measuring the weight of the material.<br>
+ * 3 - ADDING_SOIL: The machine is adding soil to the mixture.<br>
+ * 4 - LOWERING_SENSOR_PROBE: The machine is lowering the sensor probe.<br>
+ * 5 - RAISING_SENSOR_PROBE: The machine is raising the sensor probe.<br>
+ * 6 - GETTING_TEMPERATURE: The machine is measuring the temperature.<br>
+ * 7 - GETTING_MOISTURE: The machine is measuring the moisture content.<br>
+ * 8 - OPENING_GATE: The machine is opening the gate.<br>
+ * 9 - CLOSING_GATE: The machine is closing the gate.<br>
+ * 10 - MIXING: The machine is mixing the material.<br>
+ * 11 - DROPPING: The machine is dropping the material.<br>
+ * 12 - DROPPING_DONE: The dropping operation is complete.<br>
+ * 13 - ERROR_STATE: The machine has encountered an error.
+ */
 enum MachineState
 {
   IDLE,
@@ -102,6 +120,8 @@ float currentNetWeight = 0.0f;
 float targetNetWeight = 0.0f;
 float targetSoilWeight = 0.0f;
 
+
+
 Adafruit_MCP23X17 mcpInputs, mcpRelay;                                                              // Create instances of Adafruit_MCP23X17 for inputs and relay
 WiFiManager wifiManager;                                                                            // Create an instance of WiFiManager
 LiquidCrystal_I2C lcd(LCD_I2C_ADDRESS, LCD_COLUMNS, LCD_ROWS);                                      // Create an instance of LiquidCrystal_I2C
@@ -119,6 +139,11 @@ VL53L0X_RangingMeasurementData_t soilRange;
 bool isBuzzerOn = false;        // Flag to track the buzzer state
 bool isSoilDispenserOn = false; // Flag to track the soil dispenser state
 bool isMeatGrinderOn = false;   // Flag to track the meat grinder state
+
+bool foodCoverState = false; // Flag to track the food hopper cover state
+bool soilCoverState = false; // Flag to track the soil hopper cover state
+bool isFoodCoverOpenedThenClosed = false; // Flag to track if the food hopper cover was opened and then closed
+bool isSoilCoverOpenedThenClosed = false; // Flag to track if the soil hopper cover was opened and then closed
 
 void setupPt100()
 {
@@ -527,6 +552,67 @@ bool isMixerHome()
   return mcpInputs.digitalRead(MCP23017_MIXER_SAFE_PIN) == LOW;
 }
 
+#define COVER_DEBOUNCE_MS 50
+
+/**
+ * @brief Debounced open/close detection for a hopper cover.
+ *
+ * coverClosed (foodCoverState / soilCoverState): true = closed, false = open.<br>
+ * openedThenClosed: set when the cover goes open -> closed, cleared when it is opened again.
+ * The consumer should clear it after handling the event.
+ */
+void updateCoverState(bool isClosedNow, bool &coverClosed, bool &openedThenClosed, unsigned long &changeStartTime, const char *coverName)
+{
+  if (isClosedNow == coverClosed)
+  {
+    changeStartTime = 0; // Reading matches the stored state, cancel any pending change
+    return;
+  }
+
+  unsigned long now = millis();
+  if (changeStartTime == 0)
+  {
+    changeStartTime = (now == 0) ? 1 : now; // Start debounce timer
+    return;
+  }
+
+  if (now - changeStartTime < COVER_DEBOUNCE_MS)
+  {
+    return; // Not stable long enough yet
+  }
+
+  coverClosed = isClosedNow;
+  changeStartTime = 0;
+
+  if (coverClosed)
+  {
+    openedThenClosed = true;
+    Serial.printf("[COVER] %s cover closed (was opened).\n", coverName);
+  }
+  else
+  {
+    openedThenClosed = false;
+    Serial.printf("[COVER] %s cover opened.\n", coverName);
+  }
+}
+
+void setupCovers()
+{
+  foodCoverState = isFoodHopperCoverClosed();
+  soilCoverState = isSoilHopperCoverClosed();
+  isFoodCoverOpenedThenClosed = false;
+  isSoilCoverOpenedThenClosed = false;
+}
+
+void coverController()
+{
+  static unsigned long foodChangeStart = 0;
+  static unsigned long soilChangeStart = 0;
+
+  updateCoverState(isFoodHopperCoverClosed(), foodCoverState, isFoodCoverOpenedThenClosed, foodChangeStart, "Food hopper");
+  updateCoverState(isSoilHopperCoverClosed(), soilCoverState, isSoilCoverOpenedThenClosed, soilChangeStart, "Soil hopper");
+}
+
 void setupLcd()
 {
   lcd.init();      // Initialize the LCD
@@ -595,7 +681,6 @@ void moveStepperToPosition(AccelStepper &stepper, long targetPosition, const cha
 
 void moveMixerToSafePosition()
 {
-
   homeStepper(mixerStepper, isMixerHome, "Mixer Stepper", MIXER_STEPPER_MIXING_STEPS, MIXER_STEPPER_HOMING_SPEED, MIXER_STEPPER_HOMING_ACCELERATION);
   Serial.println("[MIXER] Mixer moved to safe position.\n");
 }
@@ -780,6 +865,36 @@ void serialPrintController()
   }
 }
 
+
+void mainController(){
+  // This function can be used to manage the main operations of the machine based on its current state.
+  switch (currentState)
+  {
+    case IDLE:
+      // Handle idle state
+      if (previousState != IDLE) {
+        Serial.println("[STATE] Transitioned to IDLE state.");
+      }
+
+      previousState = IDLE;
+      if 
+
+      break;
+    case ADDING_SOIL:
+      // addSoilRoutine();
+      break;
+    case DROPPING:
+      drop();
+      break;
+    case GETTING_DATA:
+      // getDataRoutine();
+      break;
+    default:
+      // Handle unknown state
+      break;
+  }
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -788,6 +903,7 @@ void setup()
   setupWifi();
   setupLcd();
   setupMcp23017();
+  setupCovers();
   delay(3000);
   setupSteppers();
   setupScale();
@@ -813,6 +929,7 @@ void setup()
 void loop()
 {
   wifiManager.process();
+  coverController();
   // calibrateScale();
   // testScale();
 
