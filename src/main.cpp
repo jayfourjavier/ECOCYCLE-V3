@@ -828,7 +828,7 @@ void setup()
   setupMcp23017();
   setupMoistureSensor();
   delay(3000);
-  // setupSteppers();
+  setupSteppers();
   setupScale();
   setupTofSensors();
   setupPt100();
@@ -837,8 +837,14 @@ void setup()
   beep(300);
 
   // turnOnMeatGrinder();
-  // delay(5000);
+  // delay(10000);
   // turnOffMeatGrinder();
+  // delay(3000);
+
+  // turnOnSoilDispenser();
+  // delay(10000);
+  // turnOffSoilDispenser();
+
   // getDataRoutine();
   // drop();
   // addSoilRoutine();
