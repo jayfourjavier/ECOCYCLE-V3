@@ -361,6 +361,11 @@ void setupMcp23017()
   mcpRelay.digitalWrite(RELAY_MEAT_GRINDER, HIGH);
 }
 
+void setupMoistureSensor()
+{
+  pinMode(SOIL_MOISTURE_SENSOR_ANALOG_PIN, INPUT);
+}
+
 void beep(int durationMs, int times = 1, int intervalMs = 100)
 {
   for (int i = 0; i < times; i++)
@@ -758,6 +763,11 @@ void mixDrop()
   moveMixerToSafePosition();
 }
 
+/*
+ *@brief Calculates the soil level percentage based on the soil range in millimeters.
+ * The percentage is calculated as the difference between the empty threshold and the current soil range,
+ *@return The soil calculated sol level percentage.
+ */
 float getSoilLevelPercent()
 {
   return constrain(
@@ -766,6 +776,11 @@ float getSoilLevelPercent()
       100.0f);
 }
 
+/*
+ *@brief Calculates the food level percentage based on the food range in millimeters.
+ * The percentage is calculated as the difference between the empty threshold and the current food range.
+ *@return The calculated food level percentage.
+ */
 float getFoodLevelPercent()
 {
   return constrain(
@@ -773,10 +788,20 @@ float getFoodLevelPercent()
       0.0f,
       100.0f);
 }
+
+/*
+ *@brief Calculates the soil moisture percentage based on the analog sensor value.
+ *@return The calculated soil moisture percentage.
+ */
+float getMoisturePercent()
+{
+  int soilMoistureValue = analogRead(SOIL_MOISTURE_SENSOR_ANALOG_PIN);
+  return map(soilMoistureValue, SOIL_MOISTURE_0_PERCENT, SOIL_MOISTURE_100_PERCENT, 0, 100);
+}
+
 // read every second
 void getTofRangeData()
 {
-
   static unsigned long lastTofReadTime = 0;
   unsigned long currentTime = millis();
   if (currentTime - lastTofReadTime >= 1000) // read every second
@@ -808,10 +833,24 @@ void drop()
 
 void readSensorData()
 {
+  static float soilLevelPercent = 0.0f;
+  static float foodLevelPercent = 0.0f;
+  static float moisturePercent = 0.0f;
+  static float temperature = 0.0f;
+
   getTofRangeData();
-  float soilMoistureValue = analogRead(SOIL_MOISTURE_SENSOR_ANALOG_PIN);
-  Serial.printf("Soil Moisture Sensor Value: %d\n", static_cast<int>(soilMoistureValue));
-  Serial.printf("Soil Moisture Percentage: %.2f %%\n", map(soilMoistureValue, SOIL_MOISTURE_0_PERCENT, SOIL_MOISTURE_100_PERCENT, 0, 100));
+  // float soilMoistureValue = analogRead(SOIL_MOISTURE_SENSOR_ANALOG_PIN);
+  // Serial.printf("Soil Moisture Sensor Value: %d\n", static_cast<int>(soilMoistureValue));
+  // Serial.printf("Soil Moisture Percentage: %.2f %%\n", map(soilMoistureValue, SOIL_MOISTURE_0_PERCENT, SOIL_MOISTURE_100_PERCENT, 0, 100));
+
+  // Get soil level percentage
+  soilLevelPercent = getSoilLevelPercent();
+  // Get food level percentage
+  foodLevelPercent = getFoodLevelPercent();
+  // Get soil moisture percentage
+  moisturePercent = getMoisturePercent();
+  // Get temperature in Celsius
+  temperature = getTemperature();
 }
 
 void getDataRoutine()
@@ -898,12 +937,10 @@ void mainController(){
 void setup()
 {
   Serial.begin(115200);
-  pinMode(SOIL_MOISTURE_SENSOR_ANALOG_PIN, INPUT);
 
   setupWifi();
   setupLcd();
   setupMcp23017();
-  setupCovers();
   delay(3000);
   setupSteppers();
   setupScale();
@@ -911,18 +948,20 @@ void setup()
   setupPt100();
 
   beep(150, 3, 100);
-
   beep(300);
 
   // turnOnMeatGrinder();
-  // delay(5000);
+  // delay(10000);
   // turnOffMeatGrinder();
+  // delay(3000);
+
+  // turnOnSoilDispenser();
+  // delay(10000);
+  // turnOffSoilDispenser();
 
   // getDataRoutine();
   // drop();
-
   // addSoilRoutine();
-
   // drop();
 }
 
@@ -933,6 +972,7 @@ void loop()
   // calibrateScale();
   // testScale();
 
+  // TEST SENSORS
   // Serial.printf("Soil Moisture Sensor Value: %d\n", analogRead(SOIL_MOISTURE_SENSOR_ANALOG_PIN));
   // Serial.printf("Temperature: %.2f °C\n", getTemperature());
   // delay(1000);
@@ -944,7 +984,7 @@ void loop()
   // delay(5000);
   // return;
 
-  // testLimitSwitches();
+  testLimitSwitches();
   // getTofRangeData();
   // lcdController();
   // serialPrintController();
