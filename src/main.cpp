@@ -76,8 +76,10 @@ MachineState previousState = IDLE;
 
 #define RELAY_SOIL_DISPENSER_POSITIVE 13 // GPB5
 #define RELAY_SOIL_DISPENSER_NEGATIVE 5  // GPA5
-#define RELAY_BUZZER 11                  // GPB3
-#define RELAY_MEAT_GRINDER 12            // GPB4
+#define RELAY_BUZZER 9                   // GPB3 // DEV MODE
+#define RELAY_MEAT_GRINDER 10            // GPB4 // DEV MODE
+// #define RELAY_BUZZER 11               // GPB3 // REAL WIRING
+// #define RELAY_MEAT_GRINDER 12         // GPB4 // REAL WIRING
 
 #define SOIL_MOISTURE_SENSOR_ANALOG_PIN 35
 
@@ -129,8 +131,6 @@ float currentNetWeight = 0.0f;
 float targetNetWeight = 0.0f;
 float targetSoilWeight = 0.0f;
 
-
-
 Adafruit_MCP23X17 mcpInputs, mcpRelay;                                                              // Create instances of Adafruit_MCP23X17 for inputs and relay
 WiFiManager wifiManager;                                                                            // Create an instance of WiFiManager
 LiquidCrystal_I2C lcd(LCD_I2C_ADDRESS, LCD_COLUMNS, LCD_ROWS);                                      // Create an instance of LiquidCrystal_I2C
@@ -149,8 +149,8 @@ bool isBuzzerOn = false;        // Flag to track the buzzer state
 bool isSoilDispenserOn = false; // Flag to track the soil dispenser state
 bool isMeatGrinderOn = false;   // Flag to track the meat grinder state
 
-bool foodCoverState = false; // Flag to track the food hopper cover state
-bool soilCoverState = false; // Flag to track the soil hopper cover state
+bool foodCoverState = false;              // Flag to track the food hopper cover state
+bool soilCoverState = false;              // Flag to track the soil hopper cover state
 bool isFoodCoverOpenedThenClosed = false; // Flag to track if the food hopper cover was opened and then closed
 bool isSoilCoverOpenedThenClosed = false; // Flag to track if the soil hopper cover was opened and then closed
 
@@ -468,8 +468,22 @@ UserAuth firebaseUserAuth(FIREBASE_WEB_API_KEY, FIREBASE_USER_EMAIL, FIREBASE_US
 FirebaseApp firebaseApp;
 RealtimeDatabase firebaseDatabase;
 
+unsigned long getEpochSeconds(unsigned long timeoutMs = 10000);
+
+bool firebaseAuthFailed = false;
+
+// Prints auth events and flags the first error so setupFirebase() can stop retrying.
+void firebaseAuthCallback(AsyncResult &aResult)
+{
+  auth_debug_print(aResult);
+  if (aResult.isError())
+  {
+    firebaseAuthFailed = true;
+  }
+}
+
 // Initializes Firebase auth and blocks (up to timeoutMs) until the app is ready.
-bool setupFirebase(unsigned long timeoutMs = 15000)
+bool setupFirebase(unsigned long timeoutMs = 30000)
 {
   if (WiFi.status() != WL_CONNECTED)
   {
@@ -477,13 +491,20 @@ bool setupFirebase(unsigned long timeoutMs = 15000)
     return false;
   }
 
+  // Valid system time is required before authenticating.
+  if (getEpochSeconds(20000) == 0)
+  {
+    Serial.println("[FIREBASE] NTP time sync failed. Skipping Firebase setup.");
+    return false;
+  }
+
   set_ssl_client_insecure_and_buffer(sslClient);
-  initializeApp(firebaseAsyncClient, firebaseApp, getAuth(firebaseUserAuth), nullptr, "authTask");
+  initializeApp(firebaseAsyncClient, firebaseApp, getAuth(firebaseUserAuth), firebaseAuthCallback, "authTask");
   firebaseApp.getApp<RealtimeDatabase>(firebaseDatabase);
   firebaseDatabase.url(FIREBASE_DATABASE_URL);
 
   unsigned long start = millis();
-  while (!firebaseApp.ready() && millis() - start < timeoutMs)
+  while (!firebaseApp.ready() && !firebaseAuthFailed && millis() - start < timeoutMs)
   {
     firebaseApp.loop();
     delay(10);
@@ -491,7 +512,8 @@ bool setupFirebase(unsigned long timeoutMs = 15000)
 
   if (!firebaseApp.ready())
   {
-    Serial.println("[FIREBASE] Authentication timed out.");
+    // firebaseApp.loop() is no longer called, so no further sign-in attempts are made.
+    Serial.println(firebaseAuthFailed ? "[FIREBASE] Authentication failed. Not retrying." : "[FIREBASE] Authentication timed out.");
     return false;
   }
 
@@ -499,7 +521,7 @@ bool setupFirebase(unsigned long timeoutMs = 15000)
   return true;
 }
 
-unsigned long getEpochSeconds(unsigned long timeoutMs = 10000)
+unsigned long getEpochSeconds(unsigned long timeoutMs)
 {
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
 
@@ -514,20 +536,232 @@ unsigned long getEpochSeconds(unsigned long timeoutMs = 10000)
   return now < 1700000000L ? 0 : static_cast<unsigned long>(now);
 }
 
-bool writeDummyDataToFirebase()
+// Record validation limits
+#define RECORD_TIMESTAMP_START_EPOCH 1700000000UL
+#define RECORD_TIMESTAMP_END_EPOCH 4102444800UL
+#define RECORD_TEMPERATURE_MIN -50.0f
+#define RECORD_TEMPERATURE_MAX 150.0f
+#define RECORD_MOISTURE_MIN 0.0f
+#define RECORD_MOISTURE_MAX 100.0f
+
+#define FIREBASE_WRITE_MAX_ATTEMPTS 3
+
+// Values stored in the batch record (record format: "EC-001,<epoch>,<temperature>,<moisture>")
+float recordTemperature = 0.0f;
+float recordMoisture = 0.0f;
+
+bool firebaseWriteString(const String &path, const String &value)
+{
+  for (uint8_t attempt = 1; attempt <= FIREBASE_WRITE_MAX_ATTEMPTS; ++attempt)
+  {
+    if (firebaseDatabase.set<String>(firebaseAsyncClient, path, value))
+    {
+      return true;
+    }
+    Serial.printf("[FIREBASE] Write attempt %u/%u failed.\n", attempt, FIREBASE_WRITE_MAX_ATTEMPTS);
+  }
+  return false;
+}
+
+String makeBatchPath(const String &batchNumber)
+{
+  return "/records/" + batchNumber;
+}
+
+String nextBatchCode(const String &latestBatch)
+{
+  if (latestBatch == "EC-000" || latestBatch.length() == 0 || !latestBatch.startsWith("EC-") || latestBatch.length() <= 3)
+    return "EC-001";
+
+  int batchNumber = latestBatch.substring(3).toInt();
+  if (batchNumber <= 0)
+    return "EC-001";
+
+  char padded[8];
+  snprintf(padded, sizeof(padded), "EC-%03d", batchNumber + 1);
+  return String(padded);
+}
+
+bool isValidBatchRecord(const String &batchKey, const String &recordValue)
+{
+  if (recordValue.length() == 0 || recordValue == "null" || recordValue == "{}" || recordValue == "[]")
+    return false;
+
+  int firstComma = recordValue.indexOf(',');
+  int secondComma = firstComma >= 0 ? recordValue.indexOf(',', firstComma + 1) : -1;
+  int thirdComma = secondComma >= 0 ? recordValue.indexOf(',', secondComma + 1) : -1;
+
+  if (firstComma <= 0 || secondComma <= firstComma || thirdComma <= secondComma || recordValue.indexOf(',', thirdComma + 1) >= 0)
+    return false;
+
+  String storedBatch = recordValue.substring(0, firstComma);
+  String timestampText = recordValue.substring(firstComma + 1, secondComma);
+  String temperatureText = recordValue.substring(secondComma + 1, thirdComma);
+  String moistureText = recordValue.substring(thirdComma + 1);
+
+  if (storedBatch != batchKey)
+    return false;
+
+  unsigned long timestamp = timestampText.toInt();
+  if (timestamp < RECORD_TIMESTAMP_START_EPOCH || timestamp > RECORD_TIMESTAMP_END_EPOCH)
+    return false;
+
+  float temperature = temperatureText.toFloat();
+  float moisture = moistureText.toFloat();
+
+  if (temperature < RECORD_TEMPERATURE_MIN || temperature > RECORD_TEMPERATURE_MAX)
+    return false;
+
+  if (moisture < RECORD_MOISTURE_MIN || moisture > RECORD_MOISTURE_MAX)
+    return false;
+
+  return true;
+}
+
+String getLatestBatchNodeName()
+{
+  String recordsJson = firebaseDatabase.get<String>(firebaseAsyncClient, "/records");
+
+  if (recordsJson.length() == 0 || recordsJson == "null" || recordsJson == "{}" || recordsJson == "[]")
+  {
+    Serial.println("[FIREBASE] /records empty => EC-000");
+    return "EC-000";
+  }
+
+  String latestBatch = "EC-000";
+  int latestNumber = 0;
+
+  int index = 0;
+  while (index < recordsJson.length())
+  {
+    int quoteStart = recordsJson.indexOf('"', index);
+    if (quoteStart < 0)
+      break;
+
+    int quoteEnd = recordsJson.indexOf('"', quoteStart + 1);
+    if (quoteEnd < 0)
+      break;
+
+    String token = recordsJson.substring(quoteStart + 1, quoteEnd);
+
+    int nextCharIndex = quoteEnd + 1;
+    while (nextCharIndex < recordsJson.length() && isSpace(recordsJson[nextCharIndex]))
+      ++nextCharIndex;
+
+    bool isKey = nextCharIndex < recordsJson.length() && recordsJson[nextCharIndex] == ':';
+
+    if (isKey && token.startsWith("EC-") && token.length() > 3)
+    {
+      String numericPart = token.substring(3);
+      if (numericPart.length() > 0 && numericPart.indexOf(" ") < 0)
+      {
+        int batchNumber = numericPart.toInt();
+        String batchValue = firebaseDatabase.get<String>(firebaseAsyncClient, "/records/" + token);
+
+        if (isValidBatchRecord(token, batchValue))
+        {
+          if (batchNumber > latestNumber)
+          {
+            latestNumber = batchNumber;
+            latestBatch = token;
+          }
+        }
+        else
+        {
+          Serial.print("[FIREBASE] Skip invalid record: ");
+          Serial.println(token);
+        }
+      }
+    }
+
+    index = quoteEnd + 1;
+  }
+
+  Serial.print("[FIREBASE] Latest valid batch: ");
+  Serial.println(latestBatch);
+  return latestBatch;
+}
+
+String makeRecordCsv(const String &batchCode, unsigned long timestamp, float temperature, float moisture)
+{
+  return batchCode + "," + String(timestamp) + "," + String(temperature, 1) + "," + String(moisture, 1);
+}
+
+String formatEpoch(unsigned long epochSeconds, const char *format)
+{
+  time_t t = (time_t)epochSeconds;
+  struct tm timeinfo;
+  localtime_r(&t, &timeinfo);
+
+  char buffer[32];
+  strftime(buffer, sizeof(buffer), format, &timeinfo);
+  return String(buffer);
+}
+
+void prettyPrintRecord(const String &dataCsv)
+{
+  int firstComma = dataCsv.indexOf(',');
+  int secondComma = firstComma >= 0 ? dataCsv.indexOf(',', firstComma + 1) : -1;
+  int thirdComma = secondComma >= 0 ? dataCsv.indexOf(',', secondComma + 1) : -1;
+
+  if (firstComma < 0 || secondComma < 0 || thirdComma < 0)
+  {
+    Serial.print("CSV record: ");
+    Serial.println(dataCsv);
+    return;
+  }
+
+  unsigned long epochSeconds = dataCsv.substring(firstComma + 1, secondComma).toInt();
+
+  Serial.println("_________________________");
+  Serial.println("Data");
+  Serial.print("Batch Number: ");
+  Serial.println(dataCsv.substring(0, firstComma));
+  Serial.print("Date: ");
+  Serial.println(formatEpoch(epochSeconds, "%Y-%m-%d"));
+  Serial.print("Time: ");
+  Serial.println(formatEpoch(epochSeconds, "%H:%M:%S"));
+  Serial.print("Temperature: ");
+  Serial.print(dataCsv.substring(secondComma + 1, thirdComma).toFloat(), 1);
+  Serial.println(" C");
+  Serial.print("Moisture: ");
+  Serial.print(dataCsv.substring(thirdComma + 1).toFloat(), 1);
+  Serial.println(" %");
+  Serial.println("_________________________");
+}
+
+// Writes a new batch record (next EC-xxx) using dummy values assigned to the global record variables,
+// then reads it back to verify.
+bool writeBatchRecord()
 {
   if (!firebaseApp.ready())
   {
-    Serial.println("[FIREBASE] Not ready. Dummy write skipped.");
+    Serial.println("[FIREBASE] Not ready. Batch record write skipped.");
     return false;
   }
 
-  unsigned long epoch = getEpochSeconds();
-  String csv = "EC-TEST," + String(epoch) + ",29.4,58.0";
+  // DUMMY DATA
+  recordTemperature = 29.4f;
+  recordMoisture = 58.0f;
 
-  bool ok = firebaseDatabase.set<String>(firebaseAsyncClient, "/test/dummy", csv);
-  Serial.printf("[FIREBASE] Dummy write %s: %s\n", ok ? "OK" : "FAILED", csv.c_str());
-  return ok;
+  String batchCode = nextBatchCode(getLatestBatchNodeName());
+  String recordPath = makeBatchPath(batchCode);
+  String csvRecord = makeRecordCsv(batchCode, getEpochSeconds(), recordTemperature, recordMoisture);
+
+  Serial.print("[FIREBASE] Writing ");
+  Serial.print(recordPath);
+  Serial.print(" = ");
+  Serial.println(csvRecord);
+
+  if (!firebaseWriteString(recordPath, csvRecord))
+  {
+    Serial.println("[FIREBASE] Batch record write FAILED.");
+    return false;
+  }
+
+  Serial.println("[FIREBASE] Batch record write OK.");
+  prettyPrintRecord(firebaseDatabase.get<String>(firebaseAsyncClient, recordPath));
+  return true;
 }
 
 void lcdPrint(const String &message, int row, bool onCenter = true, bool clearRow = true, bool allCaps = true)
@@ -982,31 +1216,32 @@ void serialPrintController()
   }
 }
 
-
-void mainController(){
+void mainController()
+{
   // This function can be used to manage the main operations of the machine based on its current state.
   switch (currentState)
   {
-    case IDLE:
-      // Handle idle state
-      if (previousState != IDLE) {
-        Serial.println("[STATE] Transitioned to IDLE state.");
-      }
+  case IDLE:
+    // Handle idle state
+    if (previousState != IDLE)
+    {
+      Serial.println("[STATE] Transitioned to IDLE state.");
+    }
 
-      previousState = IDLE;
-      break;
-    case ADDING_SOIL:
-      // addSoilRoutine();
-      break;
-    case DROPPING:
-      drop();
-      break;
-    case GETTING_DATA:
-      // getDataRoutine();
-      break;
-    default:
-      // Handle unknown state
-      break;
+    previousState = IDLE;
+    break;
+  case ADDING_SOIL:
+    // addSoilRoutine();
+    break;
+  case DROPPING:
+    drop();
+    break;
+  case GETTING_DATA:
+    // getDataRoutine();
+    break;
+  default:
+    // Handle unknown state
+    break;
   }
 }
 
@@ -1025,11 +1260,12 @@ void setup()
 
   if (setupFirebase())
   {
-    writeDummyDataToFirebase();
+    // writeBatchRecord();
+    Serial.println("[FIREBASE] Firebase setup completed successfully.");
   }
 
-  beep(150, 3, 100);
-  beep(300);
+  // beep(150, 3, 100);
+  // beep(300);
 
   // turnOnMeatGrinder();
   // delay(10000);
@@ -1066,7 +1302,7 @@ void loop()
   // delay(5000);
   // return;
 
-  testLimitSwitches();
+  // testLimitSwitches();
   // getTofRangeData();
   // lcdController();
   // serialPrintController();
