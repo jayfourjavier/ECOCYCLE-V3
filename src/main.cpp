@@ -33,7 +33,9 @@
  * 11 - DROPPING: The machine is dropping the material.<br>
  * 12 - DROPPING_DONE: The dropping operation is complete.<br>
  * 13 - ERROR_STATE: The machine has encountered an error.<br>
- * 14 - GETTING_DATA: The machine is collecting sensor data.
+ * 14 - GETTING_DATA: The machine is collecting sensor data.<br>
+ * 15 - CHECKING_FOOD_LEVEL: The machine is checking the food hopper level against the preset.<br>
+ * 16 - CHECKING_SOIL_LEVEL: The machine is checking the soil hopper level.
  */
 enum MachineState
 {
@@ -51,7 +53,9 @@ enum MachineState
   DROPPING,
   DROPPING_DONE,
   ERROR_STATE,
-  GETTING_DATA
+  GETTING_DATA,
+  CHECKING_FOOD_LEVEL,
+  CHECKING_SOIL_LEVEL
 };
 
 MachineState currentState = IDLE;
@@ -108,6 +112,13 @@ MachineState previousState = IDLE;
 
 #define SOIL_EMPTY_THRESHOLD_MM 300.0f
 #define FOOD_EMPTY_THRESHOLD_MM 200.0f
+#define FOOD_LEVEL_PRESET_PERCENT 20.0f // Food hopper level (%) that must be exceeded
+#define SOIL_LEVEL_PRESET_PERCENT 20.0f // Soil hopper level (%) that must be exceeded to start a batch
+
+#define GRIND_PULSE_MS 3000         // How long the grinder runs per pulse
+#define GRIND_SETTLE_MS 1000        // Wait after the grinder stops before reading the scale
+#define GRIND_TARGET_WEIGHT_G 50.0f // Ground food weight (g) to reach
+#define GRIND_MAX_PULSES 20         // Safety limit on grinder pulses per batch
 
 // ESP32 GPIO PINS USED TO CONTROL THE STEPPER MOTOR DRIVERS FOR SENSOR, MIXER, AND GATE STEPPERS MOTORS
 #define SENSOR_STEPPER_PULSE_PIN 32
@@ -120,8 +131,8 @@ MachineState previousState = IDLE;
 #define SCALE_DATA_PIN 16
 #define SCALE_CLOCK_PIN 4
 #define TO_CALIBRATE 0
-#define SCALE_CALIBRATION_OFFSET 450966
-#define SCALE_CALIBRATION_FACTOR 42.943184
+#define SCALE_CALIBRATION_OFFSET 914475
+#define SCALE_CALIBRATION_FACTOR 89.008
 
 float soilRangeMm = 0.0f;
 float foodRangeMm = 0.0f;
@@ -148,6 +159,11 @@ VL53L0X_RangingMeasurementData_t soilRange;
 bool isBuzzerOn = false;        // Flag to track the buzzer state
 bool isSoilDispenserOn = false; // Flag to track the soil dispenser state
 bool isMeatGrinderOn = false;   // Flag to track the meat grinder state
+
+float grindBaselineWeight = 0.0f;        // Scale reading (g) at the start of the batch, used as tare
+uint8_t grindPulseCount = 0;             // Number of grinder pulses done in this batch
+unsigned long grindPulseStartTime = 0;   // millis() when the current grinder pulse started
+unsigned long weightSettleStartTime = 0; // millis() when the grinder stopped (before weighing)
 
 bool foodCoverState = false;              // Flag to track the food hopper cover state
 bool soilCoverState = false;              // Flag to track the soil hopper cover state
@@ -289,15 +305,19 @@ void calibrateScale()
   scale.calibrate_scale(weight, 20);
   float scaleFactor = scale.get_scale();
 
-  Serial.print("SCALE:  ");
-  Serial.println(scaleFactor, 6);
-  Serial.print("\nuse scale.set_offset(");
-  Serial.print(offset);
-  Serial.print("); and scale.set_scale(");
-  Serial.print(scaleFactor, 6);
-  Serial.print(");\n");
-  Serial.println("in the setup of your project");
-  Serial.println("\n\n");
+  // Serial.print("SCALE:  ");
+  // Serial.println(scaleFactor, 6);
+  // Serial.print("\nuse scale.set_offset(");
+  // Serial.print(offset);
+  // Serial.print("); and scale.set_scale(");
+  // Serial.print(scaleFactor, 6);
+  // Serial.print(");\n");
+  // Serial.println("in the setup of your project");
+  // Serial.println("\n\n");
+
+  // PRINT THIS FORMAT
+  // #define SCALE_CALIBRATION_OFFSET 934311
+  // #define SCALE_CALIBRATION_FACTOR 54.350742
 
   Serial.printf("#define SCALE_CALIBRATION_OFFSET %ld\n", static_cast<long>(offset));
   Serial.printf("#define SCALE_CALIBRATION_FACTOR %.6f\n", scaleFactor);
@@ -838,6 +858,12 @@ void lcdController()
   case ERROR_STATE:
     lcdPrint("ERROR STATE", 0);
     break;
+  case CHECKING_FOOD_LEVEL:
+    lcdPrint("CHECKING FOOD LEVEL", 0);
+    break;
+  case CHECKING_SOIL_LEVEL:
+    lcdPrint("CHECKING SOIL LEVEL", 0);
+    break;
   default:
     lcdPrint("UNKNOWN STATE", 0);
     break;
@@ -954,9 +980,12 @@ void testLimitSwitches()
 
 void testScale()
 {
+#if TO_CALIBRATE
+  return; // Skip scale test if calibration is needed
+#endif
   float weight = getWeightGrams(20);
   Serial.printf("Weight: %.2f grams\n", weight);
-  delay(1000);
+  delay(3000);
 }
 
 void initStepper(AccelStepper &stepper, int maxSpeed, int acceleration)
@@ -1102,6 +1131,94 @@ float getFoodLevelPercent()
 }
 
 /*
+ *@brief Boots the food ToF sensor and averages several valid range readings (RangeStatus 4 = out of range is ignored).
+ * Updates foodRangeMm and foodPercentage.
+ *@param percent Receives the averaged food level percentage.
+ *@return true if at least one valid reading was obtained, false otherwise.
+ */
+bool readFoodLevelPercent(float &percent, uint8_t samples = 5)
+{
+  digitalWrite(FOOD_TOF_XSHUT_PIN, HIGH);
+  digitalWrite(SOIL_TOF_XSHUT_PIN, LOW);
+  delay(100);
+
+  if (!foodTof.begin())
+  {
+    Serial.println("[FOOD] Failed to boot food ToF sensor.");
+    return false;
+  }
+
+  float totalMm = 0.0f;
+  uint8_t validReadings = 0;
+
+  for (uint8_t i = 0; i < samples; ++i)
+  {
+    foodTof.rangingTest(&foodRange, false);
+    if (foodRange.RangeStatus != 4)
+    {
+      totalMm += static_cast<float>(foodRange.RangeMilliMeter);
+      ++validReadings;
+    }
+    delay(50);
+  }
+
+  if (validReadings == 0)
+  {
+    Serial.println("[FOOD] No valid food ToF readings (out of range).");
+    return false;
+  }
+
+  foodRangeMm = totalMm / static_cast<float>(validReadings);
+  foodPercentage = getFoodLevelPercent();
+  percent = foodPercentage;
+  return true;
+}
+
+/*
+ *@brief Boots the soil ToF sensor and averages several valid range readings (RangeStatus 4 = out of range is ignored).
+ * Updates soilRangeMm and soilPercentage.
+ *@param percent Receives the averaged soil level percentage.
+ *@return true if at least one valid reading was obtained, false otherwise.
+ */
+bool readSoilLevelPercent(float &percent, uint8_t samples = 5)
+{
+  digitalWrite(SOIL_TOF_XSHUT_PIN, HIGH);
+  digitalWrite(FOOD_TOF_XSHUT_PIN, LOW);
+  delay(100);
+
+  if (!soilTof.begin())
+  {
+    Serial.println("[SOIL] Failed to boot soil ToF sensor.");
+    return false;
+  }
+
+  float totalMm = 0.0f;
+  uint8_t validReadings = 0;
+
+  for (uint8_t i = 0; i < samples; ++i)
+  {
+    soilTof.rangingTest(&soilRange, false);
+    if (soilRange.RangeStatus != 4)
+    {
+      totalMm += static_cast<float>(soilRange.RangeMilliMeter);
+      ++validReadings;
+    }
+    delay(50);
+  }
+
+  if (validReadings == 0)
+  {
+    Serial.println("[SOIL] No valid soil ToF readings (out of range).");
+    return false;
+  }
+
+  soilRangeMm = totalMm / static_cast<float>(validReadings);
+  soilPercentage = getSoilLevelPercent();
+  percent = soilPercentage;
+  return true;
+}
+
+/*
  *@brief Calculates the soil moisture percentage based on the analog sensor value.
  *@return The calculated soil moisture percentage.
  */
@@ -1228,8 +1345,150 @@ void mainController()
       Serial.println("[STATE] Transitioned to IDLE state.");
     }
 
+    // Food grinder door: detect open -> closed event
+    if (isFoodCoverOpenedThenClosed)
+    {
+      Serial.println("[STATE] Food grinder door closed after being opened (detected).");
+      isFoodCoverOpenedThenClosed = false; // Clear the event after handling it
+
+      lcdPrint("", 1); // Clear any previous message (e.g. insufficient soil)
+      lcdPrint("", 2); // Clear any previous weight
+      currentState = CHECKING_FOOD_LEVEL;
+      lcdController(); // previousState is still IDLE here, so the new state is drawn
+      break;
+    }
+
     previousState = IDLE;
     break;
+  case CHECKING_FOOD_LEVEL:
+  {
+    float foodLevel = 0.0f;
+    bool levelRead = readFoodLevelPercent(foodLevel);
+
+    bool foodAbovePreset = false;
+    if (levelRead)
+    {
+      foodAbovePreset = foodLevel > FOOD_LEVEL_PRESET_PERCENT;
+      Serial.printf("[FOOD] Level: %.1f %% (preset: %.1f %%) -> %s\n",
+                    foodLevel,
+                    FOOD_LEVEL_PRESET_PERCENT,
+                    foodAbovePreset ? "ABOVE preset" : "NOT above preset");
+    }
+    else
+    {
+      Serial.println("[FOOD] Unable to read food level.");
+    }
+
+    previousState = CHECKING_FOOD_LEVEL;
+    // Food above preset -> check soil level next, otherwise return to IDLE
+    currentState = foodAbovePreset ? CHECKING_SOIL_LEVEL : IDLE;
+    lcdController();
+    break;
+  }
+  case CHECKING_SOIL_LEVEL:
+  {
+    float soilLevel = 0.0f;
+    MachineState nextState = IDLE;
+    if (readSoilLevelPercent(soilLevel))
+    {
+      bool soilAbovePreset = soilLevel > SOIL_LEVEL_PRESET_PERCENT;
+      Serial.printf("[SOIL] Level: %.1f %% (preset: %.1f %%) -> %s\n",
+                    soilLevel,
+                    SOIL_LEVEL_PRESET_PERCENT,
+                    soilAbovePreset ? "ABOVE preset" : "NOT above preset");
+
+      if (soilAbovePreset)
+      {
+        Serial.println("[BATCH] Soil sufficient. Batch process start.");
+        grindBaselineWeight = getWeightGrams(20);
+        grindPulseCount = 0;
+        currentNetWeight = 0.0f;
+        Serial.printf("[GRIND] Baseline weight: %.1f g, target: %.1f g\n", grindBaselineWeight, GRIND_TARGET_WEIGHT_G);
+        nextState = GRINDING;
+      }
+      else
+      {
+        Serial.println("[SOIL] Insufficient soil. Please refill the soil hopper.");
+        lcdPrint("INSUFFICIENT SOIL", 1);
+      }
+    }
+    else
+    {
+      Serial.println("[SOIL] Unable to read soil level.");
+    }
+
+    // Soil sufficient -> start grinding, otherwise return to IDLE
+    previousState = CHECKING_SOIL_LEVEL;
+    currentState = nextState;
+    lcdController();
+    break;
+  }
+  case GRINDING:
+  {
+    // Safety: stop if the food grinder door is opened while grinding
+    if (!foodCoverState)
+    {
+      turnOffMeatGrinder();
+      Serial.println("[GRIND] Food grinder door opened. Grinding aborted.");
+      lcdPrint("GRIND ABORTED", 1);
+      previousState = GRINDING;
+      currentState = IDLE;
+      lcdController();
+      break;
+    }
+
+    if (!isMeatGrinderOn)
+    {
+      turnOnMeatGrinder();
+      grindPulseStartTime = millis();
+      ++grindPulseCount;
+      Serial.printf("[GRIND] Pulse %u/%u started (%d ms).\n", grindPulseCount, GRIND_MAX_PULSES, GRIND_PULSE_MS);
+    }
+    else if (millis() - grindPulseStartTime >= GRIND_PULSE_MS)
+    {
+      turnOffMeatGrinder();
+      weightSettleStartTime = millis();
+      previousState = GRINDING;
+      currentState = GETTING_WEIGHT;
+      lcdController();
+      break;
+    }
+
+    previousState = GRINDING;
+    break;
+  }
+  case GETTING_WEIGHT:
+  {
+    if (millis() - weightSettleStartTime < GRIND_SETTLE_MS)
+    {
+      previousState = GETTING_WEIGHT;
+      break; // Let the scale settle after the grinder stops
+    }
+
+    currentNetWeight = getWeightGrams(20) - grindBaselineWeight;
+    Serial.printf("[WEIGHT] Ground food: %.1f g (target: %.1f g)\n", currentNetWeight, GRIND_TARGET_WEIGHT_G);
+    lcdPrint("Weight: " + String(currentNetWeight, 1) + " g", 2);
+
+    previousState = GETTING_WEIGHT;
+    if (currentNetWeight >= GRIND_TARGET_WEIGHT_G)
+    {
+      Serial.println("[GRIND] Target weight reached.");
+      lcdPrint("GRIND DONE", 1);
+      currentState = IDLE; // For now, return to IDLE (next step not implemented yet)
+    }
+    else if (grindPulseCount >= GRIND_MAX_PULSES)
+    {
+      Serial.println("[GRIND] Max pulses reached before target weight. Stopping.");
+      lcdPrint("GRIND TIMEOUT", 1);
+      currentState = IDLE;
+    }
+    else
+    {
+      currentState = GRINDING; // Target not reached, grind again
+    }
+    lcdController();
+    break;
+  }
   case ADDING_SOIL:
     // addSoilRoutine();
     break;
@@ -1252,6 +1511,7 @@ void setup()
   setupWifi();
   setupLcd();
   setupMcp23017();
+  setupCovers();
   delay(3000);
   setupSteppers();
   setupScale();
@@ -1287,8 +1547,9 @@ void loop()
   firebaseApp.loop();
   wifiManager.process();
   // coverController();
-  // calibrateScale();
-  // testScale();
+  // mainController();
+  calibrateScale();
+  testScale();
 
   // TEST SENSORS
   // Serial.printf("Soil Moisture Sensor Value: %d\n", analogRead(SOIL_MOISTURE_SENSOR_ANALOG_PIN));
