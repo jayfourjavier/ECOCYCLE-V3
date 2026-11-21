@@ -202,7 +202,7 @@ float foodPercentage = 0.0f;
 float currentNetWeight = 0.0f;
 float targetNetWeight = 0.0f;
 float targetSoilWeight = 0.0f;
-bool bootProceedToMixing = false; // True when the boot weight is above BOOT_MIXING_MIN_WEIGHT_G (batch already loaded)
+bool bootProceedToMixing = false;                                                                   // True when the boot weight is above BOOT_MIXING_MIN_WEIGHT_G (batch already loaded)
 float bootTareWeight = 0.0f;                                                                        // Weight (g) on the scale at boot, subtracted from every reading (calibration offset/factor stay untouched)
 Adafruit_MCP23X17 mcpInputs, mcpRelay;                                                              // Create instances of Adafruit_MCP23X17 for inputs and relay
 WiFiManager wifiManager;                                                                            // Create an instance of WiFiManager
@@ -1132,7 +1132,6 @@ void homeStepper(AccelStepper &stepper, bool (*isHome)(), const char *stepperNam
   Serial.printf("[STEPPER][HOME] %s starting at %lu ms: position=%ld, home=%u, maxSteps=%d, speed=%d, acceleration=%d\n",
                 stepperName, millis(), stepper.currentPosition(), isHome() ? 1 : 0, maxSteps, speed, acceleration);
   beep(100, 3, 100);
-  unsigned long lastProgressLog = millis();
 
   // Move the stepper until the home switch is activated
   while (!isHome())
@@ -1141,13 +1140,6 @@ void homeStepper(AccelStepper &stepper, bool (*isHome)(), const char *stepperNam
     stepper.setAcceleration(acceleration);
     stepper.moveTo(-maxSteps); // Move in the negative direction
     stepper.run();
-
-    if (millis() - lastProgressLog >= 1000)
-    {
-      Serial.printf("[STEPPER][HOME][WAIT] %s at %lu ms: position=%ld, home=%u, distanceToGo=%ld\n",
-                    stepperName, millis(), stepper.currentPosition(), isHome() ? 1 : 0, stepper.distanceToGo());
-      lastProgressLog = millis();
-    }
   }
 
   Serial.printf("[STEPPER][HOME] %s switch active at %lu ms; stopping at position=%ld.\n",
@@ -1166,18 +1158,10 @@ void moveStepperToPosition(AccelStepper &stepper, long targetPosition, const cha
   stepper.moveTo(targetPosition);
   Serial.printf("[STEPPER][MOVE] %s starting at %lu ms: position=%ld, target=%ld, distanceToGo=%ld, maxSpeed=%.1f, acceleration=%.1f\n",
                 stepperName, millis(), stepper.currentPosition(), targetPosition, stepper.distanceToGo(), stepper.maxSpeed(), stepper.acceleration());
-  unsigned long lastProgressLog = millis();
 
   while (stepper.distanceToGo() != 0)
   {
     stepper.run();
-
-    if (millis() - lastProgressLog >= 1000)
-    {
-      Serial.printf("[STEPPER][MOVE][WAIT] %s at %lu ms: position=%ld, target=%ld, distanceToGo=%ld\n",
-                    stepperName, millis(), stepper.currentPosition(), targetPosition, stepper.distanceToGo());
-      lastProgressLog = millis();
-    }
   }
   Serial.printf("[STEPPER][MOVE] %s completed at %lu ms: position=%ld, target=%ld.\n",
                 stepperName, millis(), stepper.currentPosition(), targetPosition);
@@ -1185,9 +1169,32 @@ void moveStepperToPosition(AccelStepper &stepper, long targetPosition, const cha
 
 void moveMixerToSafePosition()
 {
-  Serial.printf("[MIXER] Homing to safe position at %lu ms.\n", millis());
-  homeStepper(mixerStepper, isMixerHome, "Mixer Stepper", MIXER_STEPPER_MIXING_STEPS, MIXER_STEPPER_HOMING_SPEED, MIXER_STEPPER_HOMING_ACCELERATION);
-  Serial.printf("[MIXER] Safe position reached at %lu ms.\n", millis());
+  const long startingPosition = mixerStepper.currentPosition();
+  const int homingSpeed = -MIXER_STEPPER_HOMING_SPEED;
+  Serial.printf("[MIXER] Sensor-based homing started at %lu ms: position=%ld, sensor=%u, speed=%d steps/s.\n",
+                millis(), startingPosition, isMixerHome() ? 1 : 0, homingSpeed);
+
+  if (!isMixerHome())
+  {
+    mixerStepper.setMaxSpeed(MIXER_STEPPER_HOMING_SPEED);
+    mixerStepper.setAcceleration(MIXER_STEPPER_HOMING_ACCELERATION);
+
+    // Continue blocking moveTo/run segments in the setup homing direction until the sensor triggers.
+    const long seekChunkSteps = 10000;
+    mixerStepper.moveTo(mixerStepper.currentPosition() - seekChunkSteps);
+    while (!isMixerHome())
+    {
+      mixerStepper.run();
+
+      if (mixerStepper.distanceToGo() == 0)
+      {
+        mixerStepper.moveTo(mixerStepper.currentPosition() - seekChunkSteps);
+      }
+    }
+  }
+
+  mixerStepper.setCurrentPosition(0);
+  Serial.printf("[MIXER] Safe-position sensor triggered at %lu ms; position reset to 0.\n", millis());
 }
 
 void setupSteppers()
