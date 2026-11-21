@@ -36,6 +36,9 @@
  * 14 - GETTING_DATA: The machine is collecting sensor data.<br>
  * 15 - CHECKING_FOOD_LEVEL: The machine is checking the food hopper level against the preset.<br>
  * 16 - CHECKING_SOIL_LEVEL: The machine is checking the soil hopper level.
+ * 14 - GETTING_DATA: The machine is collecting sensor data.<br>
+ * 15 - CHECKING_FOOD_LEVEL: The machine is checking the food hopper level against the preset.<br>
+ * 16 - CHECKING_SOIL_LEVEL: The machine is checking the soil hopper level.
  */
 enum MachineState
 {
