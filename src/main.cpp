@@ -16,6 +16,8 @@
 #include "ExampleFunctions.h" // Provides SSL_CLIENT and set_ssl_client_insecure_and_buffer()
 #include "FirebaseConfig.h"
 
+// Conversation log: update ../ai_agent.md after every user request and each change to this file.
+
 /**
  * @brief Enum representing the different states of the machine.
  *
@@ -60,6 +62,49 @@ enum MachineState
   CHECKING_FOOD_LEVEL,
   CHECKING_SOIL_LEVEL
 };
+
+const char *machineStateName(MachineState state)
+{
+  switch (state)
+  {
+  case IDLE:
+    return "IDLE";
+  case GRINDING:
+    return "GRINDING";
+  case GETTING_WEIGHT:
+    return "GETTING_WEIGHT";
+  case ADDING_SOIL:
+    return "ADDING_SOIL";
+  case LOWERING_SENSOR_PROBE:
+    return "LOWERING_SENSOR_PROBE";
+  case RAISING_SENSOR_PROBE:
+    return "RAISING_SENSOR_PROBE";
+  case GETTING_TEMPERATURE:
+    return "GETTING_TEMPERATURE";
+  case GETTING_MOISTURE:
+    return "GETTING_MOISTURE";
+  case OPENING_GATE:
+    return "OPENING_GATE";
+  case CLOSING_GATE:
+    return "CLOSING_GATE";
+  case MIXING:
+    return "MIXING";
+  case DROPPING:
+    return "DROPPING";
+  case DROPPING_DONE:
+    return "DROPPING_DONE";
+  case ERROR_STATE:
+    return "ERROR_STATE";
+  case GETTING_DATA:
+    return "GETTING_DATA";
+  case CHECKING_FOOD_LEVEL:
+    return "CHECKING_FOOD_LEVEL";
+  case CHECKING_SOIL_LEVEL:
+    return "CHECKING_SOIL_LEVEL";
+  default:
+    return "UNKNOWN";
+  }
+}
 
 MachineState currentState = IDLE;
 MachineState previousState = IDLE;
@@ -888,10 +933,16 @@ void lcdPrint(const String &message, int row, bool onCenter = true, bool clearRo
 
 void lcdController()
 {
+  Serial.printf("[LCD][STATE] Refresh check at %lu ms: current=%s, previous=%s\n",
+                millis(), machineStateName(currentState), machineStateName(previousState));
+
   if (currentState == previousState)
   {
+    Serial.println("[LCD][STATE] Redraw skipped because current and previous states match.");
     return; // No state change, no need to update the LCD
   }
+
+  Serial.printf("[LCD][STATE] Rendering %s.\n", machineStateName(currentState));
 
   switch (currentState)
   {
@@ -1078,7 +1129,11 @@ void initStepper(AccelStepper &stepper, int maxSpeed, int acceleration)
 
 void homeStepper(AccelStepper &stepper, bool (*isHome)(), const char *stepperName = "Stepper", int maxSteps = 10000, int speed = 1000, int acceleration = 500)
 {
+  Serial.printf("[STEPPER][HOME] %s starting at %lu ms: position=%ld, home=%u, maxSteps=%d, speed=%d, acceleration=%d\n",
+                stepperName, millis(), stepper.currentPosition(), isHome() ? 1 : 0, maxSteps, speed, acceleration);
   beep(100, 3, 100);
+  unsigned long lastProgressLog = millis();
+
   // Move the stepper until the home switch is activated
   while (!isHome())
   {
@@ -1086,13 +1141,22 @@ void homeStepper(AccelStepper &stepper, bool (*isHome)(), const char *stepperNam
     stepper.setAcceleration(acceleration);
     stepper.moveTo(-maxSteps); // Move in the negative direction
     stepper.run();
+
+    if (millis() - lastProgressLog >= 1000)
+    {
+      Serial.printf("[STEPPER][HOME][WAIT] %s at %lu ms: position=%ld, home=%u, distanceToGo=%ld\n",
+                    stepperName, millis(), stepper.currentPosition(), isHome() ? 1 : 0, stepper.distanceToGo());
+      lastProgressLog = millis();
+    }
   }
 
-  Serial.printf("[STEPPER] %s home position reached.\n", stepperName);
+  Serial.printf("[STEPPER][HOME] %s switch active at %lu ms; stopping at position=%ld.\n",
+                stepperName, millis(), stepper.currentPosition());
   // Stop the stepper and set its current position to zero
 
   stepper.stop();
   stepper.setCurrentPosition(0);
+  Serial.printf("[STEPPER][HOME] %s complete; position reset to 0.\n", stepperName);
 }
 
 void moveStepperToPosition(AccelStepper &stepper, long targetPosition, const char *stepperName = "Stepper")
@@ -1100,17 +1164,30 @@ void moveStepperToPosition(AccelStepper &stepper, long targetPosition, const cha
   beep(100, 3, 100);
 
   stepper.moveTo(targetPosition);
+  Serial.printf("[STEPPER][MOVE] %s starting at %lu ms: position=%ld, target=%ld, distanceToGo=%ld, maxSpeed=%.1f, acceleration=%.1f\n",
+                stepperName, millis(), stepper.currentPosition(), targetPosition, stepper.distanceToGo(), stepper.maxSpeed(), stepper.acceleration());
+  unsigned long lastProgressLog = millis();
+
   while (stepper.distanceToGo() != 0)
   {
     stepper.run();
+
+    if (millis() - lastProgressLog >= 1000)
+    {
+      Serial.printf("[STEPPER][MOVE][WAIT] %s at %lu ms: position=%ld, target=%ld, distanceToGo=%ld\n",
+                    stepperName, millis(), stepper.currentPosition(), targetPosition, stepper.distanceToGo());
+      lastProgressLog = millis();
+    }
   }
-  Serial.printf("[STEPPER] %s moved to position: %ld\n", stepperName, targetPosition);
+  Serial.printf("[STEPPER][MOVE] %s completed at %lu ms: position=%ld, target=%ld.\n",
+                stepperName, millis(), stepper.currentPosition(), targetPosition);
 }
 
 void moveMixerToSafePosition()
 {
+  Serial.printf("[MIXER] Homing to safe position at %lu ms.\n", millis());
   homeStepper(mixerStepper, isMixerHome, "Mixer Stepper", MIXER_STEPPER_MIXING_STEPS, MIXER_STEPPER_HOMING_SPEED, MIXER_STEPPER_HOMING_ACCELERATION);
-  Serial.println("[MIXER] Mixer moved to safe position.\n");
+  Serial.printf("[MIXER] Safe position reached at %lu ms.\n", millis());
 }
 
 void setupSteppers()
@@ -1171,12 +1248,17 @@ void raiseSensorProbe()
 }
 void mix()
 {
+  Serial.printf("[MIX] Routine entered at %lu ms: current=%s, previous=%s, movement=%d steps.\n",
+                millis(), machineStateName(currentState), machineStateName(previousState), MIXER_STEPPER_MIXING_STEPS);
   currentState = MIXING;
   lcdController();
   initStepper(mixerStepper, MIXER_STEPPER_MAX_SPEED, MIXER_STEPPER_ACCELERATION);
   moveStepperToPosition(mixerStepper, -MIXER_STEPPER_MIXING_STEPS, "Mixer Stepper");
+  Serial.printf("[MIX] Mixing movement complete at %lu ms; holding for 1000 ms.\n", millis());
   delay(1000);
+  Serial.printf("[MIX] Returning mixer to safe position at %lu ms.\n", millis());
   moveMixerToSafePosition();
+  Serial.printf("[MIX] Routine complete at %lu ms.\n", millis());
 }
 void mixDrop()
 {
@@ -1419,6 +1501,14 @@ void serialPrintController()
 
 void mainController()
 {
+  static MachineState lastLoggedState = IDLE;
+  if (currentState != lastLoggedState)
+  {
+    Serial.printf("[STATE] %s -> %s at %lu ms.\n",
+                  machineStateName(lastLoggedState), machineStateName(currentState), millis());
+    lastLoggedState = currentState;
+  }
+
   // This function can be used to manage the main operations of the machine based on its current state.
   switch (currentState)
   {
@@ -1667,10 +1757,10 @@ void mainController()
   }
   case MIXING:
   {
-    Serial.println("[MIX] Mixing started.");
+    Serial.printf("[MIX] Mixing state entered at %lu ms.\n", millis());
     previousState = MIXING; // LCD already shows MIXING, avoid redrawing it inside mix()
     mix();                  // Blocking: runs the mixer then returns it to the safe position
-    Serial.println("[MIX] Mixing done.");
+    Serial.printf("[MIX] Mixing state work finished at %lu ms; advancing to GETTING_DATA.\n", millis());
     lcdPrint("MIX DONE", 1);
     currentState = GETTING_DATA;
     lcdController();
